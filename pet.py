@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-坎特蕾拉桌宠（PyQt6）
+胧嫣桌宠（PyQt6）
 ============================
 基于小蕾米桌宠精简而来，只保留核心桌宠交互功能。
 
@@ -13,7 +13,11 @@
     左键单击  = 随机表情互动（2 秒后恢复）
     左键双击  = 切换自选动作
     鼠标滚轮  = 缩放（0.5x ~ 2x）
-    右键菜单  = 重置位置 / 开机自启 / 双击动作 / 退出
+    右键菜单  = 重置位置 / 开机自启 / 打字检测 / 全屏隐藏 / 双击动作 / 退出
+
+功能开关（右键菜单）：
+    打字检测  = 检测到键盘输入时切换到记笔记动画
+    全屏隐藏  = 前台应用全屏时自动隐藏桌宠
 
 模块结构：
     constants.py  常量配置（GIF 分类字典）
@@ -27,6 +31,8 @@ import time
 import traceback
 if sys.platform.startswith('win'):
     import winreg
+    import ctypes
+    import ctypes.wintypes
 from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox
 from PyQt6.QtCore import Qt, QTimer, QPoint
 from PyQt6.QtGui import QPixmap, QMovie, QPainter, QIcon, QAction, QActionGroup
@@ -77,6 +83,17 @@ class DesktopPet(QLabel):
         self._autostart = self._check_autostart()
         self._drag_gifs = GIF_CATEGORIES['drag']
 
+        # 打字检测状态
+        self._typing_active = False
+        self._last_key_time = 0.0
+        self._keyboard_listener = None
+        self._global_typing_timer = QTimer(self)
+        self._global_typing_timer.timeout.connect(self._poll_keyboard)
+        self._start_keyboard_listener()
+
+        # 全屏隐藏状态
+        self._hidden_by_fullscreen = False
+
         # 启动：随机选一个待机表情
         self.current_gif_name = random.choice(GIF_CATEGORIES['idle'])
         self.movie = QMovie(self.gif_paths[self.current_gif_name])
@@ -90,6 +107,12 @@ class DesktopPet(QLabel):
             self.update_frame(self.movie.currentFrameNumber())
         else:
             self.move_to_corner()
+
+        # 轮询定时器：全屏隐藏
+        self._fullscreen_poll_timer = QTimer(self)
+        self._fullscreen_poll_timer.timeout.connect(self._check_fullscreen)
+        if self._hide_on_fullscreen:
+            self._fullscreen_poll_timer.start(500)
 
     def load_offsets(self):
         """加载坐标配置（每个 GIF 的绘制偏移）"""
@@ -110,12 +133,16 @@ class DesktopPet(QLabel):
             if isinstance(saved_dbl, int):
                 saved_dbl = GIF_NAMES[saved_dbl] if saved_dbl < len(GIF_NAMES) else '比心.gif'
             self._saved_double_click = saved_dbl
+            self._typing_enabled = data.get('typing', False)
+            self._hide_on_fullscreen = data.get('hide_on_fullscreen', True)
 
     def save_settings(self):
         """保存当前位置和大小"""
         pos = self.pos()
         data = {'x': pos.x(), 'y': pos.y(), 'scale': self.scale_factor,
-                'double_click': self.double_click_name}
+                'double_click': self.double_click_name,
+                'typing': self._typing_enabled,
+                'hide_on_fullscreen': self._hide_on_fullscreen}
         with open(self.settings_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -128,7 +155,7 @@ class DesktopPet(QLabel):
                     winreg.HKEY_CURRENT_USER,
                     r'Software\Microsoft\Windows\CurrentVersion\Run',
                     0, winreg.KEY_READ) as key:
-                value, _ = winreg.QueryValueEx(key, '坎特蕾拉桌宠')
+                value, _ = winreg.QueryValueEx(key, '胧嫣桌宠')
                 exe = value.strip().strip('"')
                 return os.path.exists(exe)
         except OSError:
@@ -148,11 +175,11 @@ class DesktopPet(QLabel):
                         exe = os.path.abspath(sys.argv[0])
                     else:
                         exe = sys.executable
-                    winreg.SetValueEx(key, '坎特蕾拉桌宠', 0,
+                    winreg.SetValueEx(key, '胧嫣桌宠', 0,
                                       winreg.REG_SZ, '"%s"' % exe)
                 else:
                     try:
-                        winreg.DeleteValue(key, '坎特蕾拉桌宠')
+                        winreg.DeleteValue(key, '胧嫣桌宠')
                     except OSError:
                         pass
             self._autostart = enable
@@ -187,9 +214,51 @@ class DesktopPet(QLabel):
     def double_click_name(self, name):
         self._double_click_name = name
 
+    @property
+    def _typing_enabled(self):
+        return getattr(self, '_typing_enabled_value', False)
+
+    @_typing_enabled.setter
+    def _typing_enabled(self, value):
+        self._typing_enabled_value = value
+
+    @property
+    def _hide_on_fullscreen(self):
+        return getattr(self, '_hide_on_fullscreen_value', True)
+
+    @_hide_on_fullscreen.setter
+    def _hide_on_fullscreen(self, value):
+        self._hide_on_fullscreen_value = value
+
     def set_double_click_action(self, name):
         """设置双击动作（按文件名）"""
         self.double_click_name = name
+        self.save_settings()
+
+    def toggle_typing(self):
+        """切换打字检测开关"""
+        self._typing_enabled = not self._typing_enabled
+        self._typing_action.setChecked(self._typing_enabled)
+        if self._typing_enabled:
+            self._global_typing_timer.start(300)
+        else:
+            self._global_typing_timer.stop()
+            if self._typing_active:
+                self._typing_active = False
+                self.switch_to_gif(random.choice(GIF_CATEGORIES['idle']))
+        self.save_settings()
+
+    def toggle_hide_on_fullscreen(self):
+        """切换全屏隐藏开关"""
+        self._hide_on_fullscreen = not self._hide_on_fullscreen
+        self._fullscreen_action.setChecked(self._hide_on_fullscreen)
+        if self._hide_on_fullscreen:
+            self._fullscreen_poll_timer.start(500)
+        else:
+            self._fullscreen_poll_timer.stop()
+            if self._hidden_by_fullscreen:
+                self._hidden_by_fullscreen = False
+                self.show()
         self.save_settings()
 
     def random_from_category(self, category):
@@ -249,8 +318,98 @@ class DesktopPet(QLabel):
         """单击互动后恢复到随机待机表情"""
         self.switch_to_gif(random.choice(GIF_CATEGORIES['idle']))
 
+    def _start_keyboard_listener(self):
+        """启动全局键盘监听线程（pynput）"""
+        try:
+            from pynput import keyboard
+        except ImportError:
+            return
+
+        def _on_press(key):
+            self._last_key_time = time.time()
+
+        self._keyboard_listener = keyboard.Listener(on_press=_on_press)
+        self._keyboard_listener.daemon = True
+        self._keyboard_listener.start()
+        self._global_typing_timer.start(300)
+
+    def _stop_keyboard_listener(self):
+        """停止键盘监听"""
+        self._global_typing_timer.stop()
+        if self._keyboard_listener is not None:
+            try:
+                self._keyboard_listener.stop()
+            except Exception:
+                pass
+            self._keyboard_listener = None
+
+    def _poll_keyboard(self):
+        """轮询全局按键：最近 1 秒有按键则播放打字动画，停止 2 秒后恢复"""
+        if not self._typing_enabled:
+            return
+        elapsed = time.time() - self._last_key_time
+        if elapsed < 1.0:
+            if not self._typing_active:
+                self._typing_active = True
+                self.click_recovery_timer.stop()
+                self.switch_to_gif(random.choice(GIF_CATEGORIES['typing']))
+        elif self._typing_active and elapsed >= 2.0:
+            self._recover_from_typing()
+
+    def _recover_from_typing(self):
+        """打字停止后恢复到随机待机表情"""
+        if self._typing_active:
+            self._typing_active = False
+            idle_gifs = [g for g in GIF_CATEGORIES['idle']
+                         if g != self.current_gif_name]
+            if not idle_gifs:
+                idle_gifs = GIF_CATEGORIES['idle']
+            self.switch_to_gif(random.choice(idle_gifs))
+
+    def _check_fullscreen(self):
+        """检测前台应用是否全屏，自动隐藏/显示桌宠"""
+        if not sys.platform.startswith('win'):
+            return
+        try:
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if not hwnd:
+                if self._hidden_by_fullscreen:
+                    self._hidden_by_fullscreen = False
+                    self.show()
+                return
+
+            # 排除自身窗口
+            if int(hwnd) == int(self.winId()):
+                return
+
+            rect = ctypes.wintypes.RECT()
+            ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            screen = QApplication.primaryScreen().geometry()
+
+            is_fullscreen = (
+                abs(rect.left - screen.left()) <= 2 and
+                abs(rect.top - screen.top()) <= 2 and
+                abs(rect.right - screen.right()) <= 2 and
+                abs(rect.bottom - screen.bottom()) <= 2
+            )
+
+            if is_fullscreen and not self._hidden_by_fullscreen:
+                self._hidden_by_fullscreen = True
+                self.hide()
+            elif not is_fullscreen and self._hidden_by_fullscreen:
+                self._hidden_by_fullscreen = False
+                self.show()
+        except Exception:
+            pass
+
+    def _reset_typing_state(self):
+        """重置打字状态（在鼠标交互时调用）"""
+        if self._typing_active:
+            self._typing_active = False
+
     def mousePressEvent(self, event):
         """鼠标按下事件"""
+        self._reset_typing_state()
         if event.button() == Qt.MouseButton.LeftButton:
             self.press_position = event.globalPosition().toPoint()
             self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
@@ -292,6 +451,7 @@ class DesktopPet(QLabel):
 
     def mouseDoubleClickEvent(self, event):
         """鼠标双击：在默认待机与选定的双击动作之间切换"""
+        self._reset_typing_state()
         if event.button() == Qt.MouseButton.LeftButton:
             self.click_recovery_timer.stop()
             self._suppress_next_release = True
@@ -321,12 +481,26 @@ class DesktopPet(QLabel):
         menu.addAction(autostart_action)
         menu.addSeparator()
 
+        self._typing_action = QAction('打字检测', self)
+        self._typing_action.setCheckable(True)
+        self._typing_action.setChecked(self._typing_enabled)
+        self._typing_action.triggered.connect(self.toggle_typing)
+        menu.addAction(self._typing_action)
+
+        self._fullscreen_action = QAction('全屏隐藏', self)
+        self._fullscreen_action.setCheckable(True)
+        self._fullscreen_action.setChecked(self._hide_on_fullscreen)
+        self._fullscreen_action.triggered.connect(self.toggle_hide_on_fullscreen)
+        menu.addAction(self._fullscreen_action)
+        menu.addSeparator()
+
         # 双击动作子菜单：按分类组织
         dbl_menu = QMenu('双击动作', menu)
         dbl_group = QActionGroup(self)
         dbl_group.setExclusive(True)
         for category, gifs in GIF_CATEGORIES.items():
-            cat_names = {'idle': '待机', 'reactions': '反应', 'drag': '拖拽', 'actions': '动作'}
+            cat_names = {'idle': '待机', 'reactions': '反应', 'drag': '拖拽',
+                         'actions': '动作', 'typing': '打字'}
             sub_menu = dbl_menu.addMenu(cat_names.get(category, category))
             for name in gifs:
                 act = QAction(name.replace('.gif', ''), self)
@@ -345,7 +519,8 @@ class DesktopPet(QLabel):
         menu.exec(position)
 
     def do_quit(self):
-        """退出前保存设置"""
+        """退出前保存设置并清理监听"""
+        self._stop_keyboard_listener()
         self.save_settings()
         QApplication.quit()
 
