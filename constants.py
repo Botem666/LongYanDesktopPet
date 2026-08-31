@@ -7,13 +7,10 @@
 # drag      — 拖拽：被拖动时播放
 # actions   — 动作：双击可选的特殊动作
 GIF_CATEGORIES = {
-    'idle': ['吃薯片.gif', '喝奶茶.gif', '喝茶.gif', '纸箱.gif'],
-    'reactions': ['害羞.gif', '喜欢.gif', '震惊.gif', '疑惑.gif', '无语.gif', '慌.gif',
-                  '我擦.gif', '噗呲.gif', '哼哼.gif', '阴险.gif', '端详.gif', '灵光.gif',
-                  '举牌.gif', '口水.gif', 'yes.gif', '思考.gif', '生气.gif'],
-    'drag': ['抱抱.gif', '扶墙.gif', '想要.gif', '戳戳.gif', '对手指.gif', '拉泪.gif'],
-    'actions': ['中指.gif', '点赞.gif', '鼓掌.gif', '上吊.gif', '上工.gif', '吐舌.gif',
-                '扣脸.gif', '比x.gif', '浇水.gif', '捏脸.gif', '捏鼻.gif'],
+    'idle': ['卖萌.gif', '吃爆米花.gif', '吃瓜.gif', '记笔记1.gif', '记笔记2.gif'],
+    'reactions': ['哈喽.gif', '害羞.gif', '摇一摇.gif', '灵魂出窍.gif', '难绷.gif'],
+    'drag': ['摇一摇.gif'],
+    'actions': ['有钱.gif', '超级有钱.gif', '来喝一杯.gif', '比心.gif'],
 }
 
 # 所有 GIF 文件名（扁平列表，用于坐标配置等）

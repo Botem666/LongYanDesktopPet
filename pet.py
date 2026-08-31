@@ -105,10 +105,10 @@ class DesktopPet(QLabel):
                 data = json.load(f)
             self._saved_pos = QPoint(data.get('x', 0), data.get('y', 0))
             self._saved_scale = data.get('scale', 1)
-            saved_dbl = data.get('double_click', '点赞.gif')
+            saved_dbl = data.get('double_click', '比心.gif')
             # 兼容旧版索引格式
             if isinstance(saved_dbl, int):
-                saved_dbl = GIF_NAMES[saved_dbl] if saved_dbl < len(GIF_NAMES) else '点赞.gif'
+                saved_dbl = GIF_NAMES[saved_dbl] if saved_dbl < len(GIF_NAMES) else '比心.gif'
             self._saved_double_click = saved_dbl
 
     def save_settings(self):
@@ -181,7 +181,7 @@ class DesktopPet(QLabel):
     @property
     def double_click_name(self):
         """当前双击动作的 GIF 文件名"""
-        return getattr(self, '_double_click_name', '点赞.gif')
+        return getattr(self, '_double_click_name', '比心.gif')
 
     @double_click_name.setter
     def double_click_name(self, name):

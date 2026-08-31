@@ -1,6 +1,6 @@
-# 坎特蕾拉桌宠物（PyQt6）
+# 胧嫣桌宠物（PyQt6）
 
-坎特蕾拉（鸣潮）桌面宠物。
+胧嫣桌面宠物。
 
 ## 运行
 
@@ -28,21 +28,21 @@ python pet.py
 - **双击动作**：按分类（待机/反应/拖拽/动作）自选双击时播放的 GIF
 - **退出**：关闭桌宠
 
-## 表情包分类（38 个 GIF）
+## 表情包分类（14 个 GIF）
 
 | 分类 | 数量 | 触发方式 | 包含表情 |
 | --- | --- | --- | --- |
-| 待机 (idle) | 4 | 启动时随机 / 单击恢复 | 吃薯片、喝奶茶、喝茶、纸箱 |
-| 反应 (reactions) | 17 | 单击随机触发 | 害羞、喜欢、震惊、生气、无语、慌、阴险等 |
-| 拖拽 (drag) | 6 | 拖动桌宠时播放 | 抱抱、扶墙、想要、戳戳、对手指、拉泪 |
-| 动作 (actions) | 11 | 双击时播放（可自选） | 点赞、鼓掌、中指、吐舌、上工等 |
+| 待机 (idle) | 5 | 启动时随机 / 单击恢复 | 卖萌、吃爆米花、吃瓜、记笔记1、记笔记2 |
+| 反应 (reactions) | 5 | 单击随机触发 | 哈喽、害羞、摇一摇、灵魂出窍、难绷 |
+| 拖拽 (drag) | 1 | 拖动桌宠时播放 | 摇一摇 |
+| 动作 (actions) | 4 | 双击时播放（可自选） | 有钱、超级有钱、来喝一杯、比心 |
 
 ## 目录结构
 
 ```
 pet.py              桌宠主窗口（DesktopPet），入口文件
 constants.py        常量配置（GIF 分类字典）
-gif/                38 个坎特蕾拉表情 GIF
+gif/                14 个胧嫣表情 GIF
 favicon.ico         程序图标
 坐标配置.json        每个 GIF 的绘制偏移（默认全 0，可手动微调）
 设置.json           记忆上次位置/大小/双击动作（退出时自动生成）
@@ -57,8 +57,8 @@ favicon.ico         程序图标
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --windowed --name "坎特蕾拉桌宠" --icon favicon.ico \
+pyinstaller --onefile --windowed --name "胧嫣桌宠" --icon favicon.ico \
   --add-data "gif;gif" --add-data "favicon.ico;." pet.py
 ```
 
-单文件输出在 `dist/坎特蕾拉桌宠.exe`。
+单文件输出在 `dist/胧嫣桌宠.exe`。
