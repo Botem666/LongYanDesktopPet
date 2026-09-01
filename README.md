@@ -3,8 +3,8 @@
 尘白禁区-胧嫣，桌面宠物。
 
 ## 来源
-在https://github.com/todaywish945-ux/-的基础上二次开发
-表情包素材来源：B站@吃个咲夜吧
+- 在 https://github.com/todaywish945-ux/- 的基础上二次开发
+- 表情包素材来源：B站@吃个咲夜吧
 
 ## 运行
 
