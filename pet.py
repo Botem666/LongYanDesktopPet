@@ -33,6 +33,25 @@ if sys.platform.startswith('win'):
     import winreg
     import ctypes
     import ctypes.wintypes
+
+    class _MONITORINFO(ctypes.Structure):
+        _fields_ = [('cbSize', ctypes.wintypes.DWORD),
+                    ('rcMonitor', ctypes.wintypes.RECT),
+                    ('rcWork', ctypes.wintypes.RECT),
+                    ('dwFlags', ctypes.wintypes.DWORD)]
+
+    _user32 = ctypes.windll.user32
+    _user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
+    _user32.GetWindowRect.argtypes = [ctypes.wintypes.HWND,
+                                      ctypes.POINTER(ctypes.wintypes.RECT)]
+    _user32.MonitorFromWindow.argtypes = [ctypes.wintypes.HWND,
+                                          ctypes.wintypes.DWORD]
+    _user32.MonitorFromWindow.restype = ctypes.wintypes.HMONITOR
+    _user32.GetMonitorInfoW.argtypes = [ctypes.wintypes.HMONITOR,
+                                        ctypes.POINTER(_MONITORINFO)]
+    _user32.SetWindowPos.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.HWND,
+                                     ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                     ctypes.c_int, ctypes.wintypes.UINT]
 from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox
 from PyQt6.QtCore import Qt, QTimer, QPoint
 from PyQt6.QtGui import QPixmap, QMovie, QPainter, QIcon, QAction, QActionGroup
@@ -108,11 +127,10 @@ class DesktopPet(QLabel):
         else:
             self.move_to_corner()
 
-        # 轮询定时器：全屏隐藏
+        # 轮询定时器：全屏隐藏 / 保持置顶
         self._fullscreen_poll_timer = QTimer(self)
         self._fullscreen_poll_timer.timeout.connect(self._check_fullscreen)
-        if self._hide_on_fullscreen:
-            self._fullscreen_poll_timer.start(500)
+        self._fullscreen_poll_timer.start(500)
 
     def load_offsets(self):
         """加载坐标配置（每个 GIF 的绘制偏移）"""
@@ -252,13 +270,10 @@ class DesktopPet(QLabel):
         """切换全屏隐藏开关"""
         self._hide_on_fullscreen = not self._hide_on_fullscreen
         self._fullscreen_action.setChecked(self._hide_on_fullscreen)
-        if self._hide_on_fullscreen:
-            self._fullscreen_poll_timer.start(500)
-        else:
-            self._fullscreen_poll_timer.stop()
-            if self._hidden_by_fullscreen:
-                self._hidden_by_fullscreen = False
-                self.show()
+        if not self._hide_on_fullscreen and self._hidden_by_fullscreen:
+            # 关闭开关时若正处于隐藏状态，立即恢复显示
+            self._hidden_by_fullscreen = False
+            self.show()
         self.save_settings()
 
     def random_from_category(self, category):
@@ -366,39 +381,68 @@ class DesktopPet(QLabel):
                 idle_gifs = GIF_CATEGORIES['idle']
             self.switch_to_gif(random.choice(idle_gifs))
 
-    def _check_fullscreen(self):
-        """检测前台应用是否全屏，自动隐藏/显示桌宠"""
-        if not sys.platform.startswith('win'):
+    def _assert_topmost(self):
+        """重新置顶，防止被全屏/其它置顶窗口盖住"""
+        if not sys.platform.startswith('win') or not self.isVisible():
             return
         try:
-            hwnd = ctypes.windll.user32.GetForegroundWindow()
-            if not hwnd:
+            # HWND_TOPMOST(-1)
+            # SWP_NOSIZE(0x1) | SWP_NOMOVE(0x2) | SWP_NOACTIVATE(0x10) | SWP_SHOWWINDOW(0x40)
+            _user32.SetWindowPos(int(self.winId()), -1, 0, 0, 0, 0,
+                                 0x0001 | 0x0002 | 0x0010 | 0x0040)
+        except Exception:
+            pass
+
+    def _check_fullscreen(self):
+        """检测前台应用是否全屏：开关开则隐藏，否则保持置顶"""
+        if not sys.platform.startswith('win'):
+            return
+        # 菜单/对话框打开时暂停，避免持续置顶把自家弹窗盖住
+        if QApplication.activeModalWidget() or QApplication.activePopupWidget():
+            return
+        try:
+            hwnd = _user32.GetForegroundWindow()
+
+            # 无前台窗口或前台是自身：保证可见并置顶即可
+            if not hwnd or int(hwnd) == int(self.winId()):
                 if self._hidden_by_fullscreen:
                     self._hidden_by_fullscreen = False
                     self.show()
-                return
-
-            # 排除自身窗口
-            if int(hwnd) == int(self.winId()):
+                else:
+                    self._assert_topmost()
                 return
 
             rect = ctypes.wintypes.RECT()
-            ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
-            screen = QApplication.primaryScreen().geometry()
+            _user32.GetWindowRect(hwnd, ctypes.byref(rect))
+
+            # 取前台窗口所在显示器，用物理像素比较
+            # （GetWindowRect 是物理像素，而 QScreen.geometry 是逻辑像素，
+            #   在高 DPI 缩放下两者不一致，会导致全屏误判）
+            monitor = _user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+            if not monitor:
+                return
+            info = _MONITORINFO()
+            info.cbSize = ctypes.sizeof(_MONITORINFO)
+            _user32.GetMonitorInfoW(monitor, ctypes.byref(info))
+            mon = info.rcMonitor
 
             is_fullscreen = (
-                abs(rect.left - screen.left()) <= 2 and
-                abs(rect.top - screen.top()) <= 2 and
-                abs(rect.right - screen.right()) <= 2 and
-                abs(rect.bottom - screen.bottom()) <= 2
+                abs(rect.left - mon.left) <= 2 and
+                abs(rect.top - mon.top) <= 2 and
+                abs(rect.right - mon.right) <= 2 and
+                abs(rect.bottom - mon.bottom) <= 2
             )
 
-            if is_fullscreen and not self._hidden_by_fullscreen:
-                self._hidden_by_fullscreen = True
-                self.hide()
-            elif not is_fullscreen and self._hidden_by_fullscreen:
-                self._hidden_by_fullscreen = False
-                self.show()
+            if is_fullscreen and self._hide_on_fullscreen:
+                if not self._hidden_by_fullscreen:
+                    self._hidden_by_fullscreen = True
+                    self.hide()
+            else:
+                if self._hidden_by_fullscreen:
+                    self._hidden_by_fullscreen = False
+                    self.show()
+                # 无论是否全屏都保持置顶，避免被全屏/其它置顶窗口盖住
+                self._assert_topmost()
         except Exception:
             pass
 
