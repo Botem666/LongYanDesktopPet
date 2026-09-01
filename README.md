@@ -1,6 +1,10 @@
-# 胧嫣桌宠物（PyQt6）
+# 胧嫣桌宠
 
-胧嫣桌面宠物。
+尘白禁区-胧嫣，桌面宠物。
+
+## 来源
+在https://github.com/todaywish945-ux/-的基础上二次开发
+表情包素材来源：B站@吃个咲夜吧
 
 ## 运行
 
@@ -9,7 +13,7 @@ pip install -r requirements.txt
 python pet.py
 ```
 
-依赖：`PyQt6>=6.6`、`pynput>=1.8`（打字检测）
+依赖：`PyQt6>=6.6`、`pynput>=1.8`
 
 ## 操作
 
@@ -24,7 +28,7 @@ python pet.py
 ### 右键菜单
 
 - **重置位置和大小**：恢复默认位置和缩放
-- **开机自启**：勾选后 Windows 开机自动启动（写注册表 `HKCU\...\Run`）
+- **开机自启**：勾选后 Windows 开机自动启动
 - **打字检测**：勾选后检测到键盘输入时播放「记笔记」动画，停止约 2 秒后恢复待机
 - **全屏隐藏**：勾选后前台应用全屏时自动隐藏桌宠（仅 Windows）
 - **双击动作**：按分类（待机/反应/拖拽/动作/打字）自选双击时播放的 GIF
@@ -62,8 +66,7 @@ favicon.ico         程序图标
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --windowed --name "胧嫣桌宠" --icon favicon.ico \
-  --add-data "gif;gif" --add-data "favicon.ico;." pet.py
+pyinstaller --onefile --windowed --name "胧嫣桌宠" --icon favicon.ico  --add-data "gif;gif" --add-data "favicon.ico;." pet.py
 ```
 
 单文件输出在 `dist/胧嫣桌宠.exe`。
