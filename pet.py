@@ -53,7 +53,7 @@ if sys.platform.startswith('win'):
                                      ctypes.c_int, ctypes.c_int, ctypes.c_int,
                                      ctypes.c_int, ctypes.wintypes.UINT]
 from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox
-from PyQt6.QtCore import Qt, QTimer, QPoint
+from PyQt6.QtCore import Qt, QTimer, QPoint, QLockFile, QDir
 from PyQt6.QtGui import QPixmap, QMovie, QPainter, QIcon, QAction, QActionGroup
 
 from constants import GIF_CATEGORIES, GIF_NAMES
@@ -596,6 +596,13 @@ if __name__ == '__main__':
     sys.excepthook = _excepthook
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+
+    # 防止重复启动：锁文件在系统临时目录，已有实例在运行则提示并退出
+    lock = QLockFile(os.path.join(QDir.tempPath(), 'longyan_pet.lock'))
+    if not lock.tryLock(100):
+        QMessageBox.information(None, '胧嫣桌宠', '桌宠已经在运行中啦～')
+        sys.exit(0)
+
     pet = DesktopPet()
     pet.show()
     sys.exit(app.exec())
