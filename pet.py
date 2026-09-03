@@ -9,18 +9,20 @@
     python pet.py
 
 交互：
-    左键拖拽  = 移动位置
-    左键单击  = 随机表情互动（2 秒后恢复）
+    左键拖拽  = 移动位置（松手吸附回屏幕内）
+    左键单击  = 随机表情互动 + 气泡台词（2 秒后恢复）
     左键双击  = 切换自选动作
     鼠标滚轮  = 缩放（0.5x ~ 2x）
-    右键菜单  = 重置位置 / 开机自启 / 打字检测 / 全屏隐藏 / 双击动作 / 退出
+    托盘图标  = 单击隐藏/显示，右键打开功能菜单
 
-功能开关（右键菜单）：
+功能开关（托盘菜单）：
     打字检测  = 检测到键盘输入时切换到记笔记动画
     全屏隐藏  = 前台应用全屏时自动隐藏桌宠
+    随机待机  = 空闲时每 20 秒随机切换待机表情
+    按时问候  = 早/午/晚固定时段各问候一次
 
 模块结构：
-    constants.py  常量配置（GIF 分类字典）
+    constants.py  常量配置（GIF 分类 + 气泡台词）
     pet.py        桌宠主窗口（本文件）
 """
 import sys
@@ -52,11 +54,45 @@ if sys.platform.startswith('win'):
     _user32.SetWindowPos.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.HWND,
                                      ctypes.c_int, ctypes.c_int, ctypes.c_int,
                                      ctypes.c_int, ctypes.wintypes.UINT]
-from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox
-from PyQt6.QtCore import Qt, QTimer, QPoint, QLockFile, QDir
-from PyQt6.QtGui import QPixmap, QMovie, QPainter, QIcon, QAction, QActionGroup
+from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox, QSystemTrayIcon
+from PyQt6.QtCore import Qt, QTimer, QPoint, QLockFile, QDir, QSize
+from PyQt6.QtGui import QPixmap, QMovie, QPainter, QIcon, QAction, QActionGroup, QColor
 
-from constants import GIF_CATEGORIES, GIF_NAMES
+from constants import GIF_CATEGORIES, GIF_NAMES, BUBBLE_LINES
+
+
+class BubbleLabel(QLabel):
+    """气泡标签：圆角半透明黑底 + 白字（QPainter 自绘，不依赖 QSS）"""
+
+    def __init__(self):
+        super().__init__()
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        font = self.font()
+        font.setPixelSize(14)
+        self.setFont(font)
+        self._padding_x = 12
+        self._padding_y = 8
+        self._radius = 10
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # 圆角半透明黑底
+        painter.setBrush(QColor(0, 0, 0, 100))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(self.rect(), self._radius, self._radius)
+        # 白字居中
+        text_rect = self.rect().adjusted(self._padding_x, self._padding_y,
+                                         -self._padding_x, -self._padding_y)
+        painter.setPen(QColor(255, 255, 255))
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, self.text())
+        painter.end()
+
+    def sizeHint(self):
+        fm = self.fontMetrics()
+        size = fm.size(0, self.text())
+        return QSize(size.width() + self._padding_x * 2,
+                     size.height() + self._padding_y * 2)
 
 
 class DesktopPet(QLabel):
@@ -86,6 +122,11 @@ class DesktopPet(QLabel):
         self.config_file = os.path.join(self._data_dir, '坐标配置.json')
         self.offsets = self.load_offsets()
         self.settings_file = os.path.join(self._data_dir, '设置.json')
+        self._opacity = 1.0
+        self._scale_stepped = True
+        self._snap_to_edge = True
+        self._random_idle_enabled = True
+        self._greeting_enabled = True
         self.load_settings()
         self.scale_factor = 0.5
         self.original_size = None
@@ -94,6 +135,7 @@ class DesktopPet(QLabel):
         self.is_dragging = False
         self.pre_drag_gif_name = None
         self.drag_threshold = 5
+        self._position_locked = False
         self.click_recovery_timer = QTimer(self)
         self.click_recovery_timer.setSingleShot(True)
         self.click_recovery_timer.timeout.connect(self.recover_from_click)
@@ -113,6 +155,17 @@ class DesktopPet(QLabel):
         # 全屏隐藏状态
         self._hidden_by_fullscreen = False
 
+        # 气泡 / 随机待机 / 按时问候
+        self.bubble = None
+        self._bubble_timer = QTimer(self)
+        self._bubble_timer.setSingleShot(True)
+        self._bubble_timer.timeout.connect(self._hide_bubble)
+        self._last_greet_key = ''
+        self._idle_switch_timer = QTimer(self)
+        self._idle_switch_timer.timeout.connect(self._maybe_switch_idle)
+        self._greet_timer = QTimer(self)
+        self._greet_timer.timeout.connect(self._check_greeting)
+
         # 启动：随机选一个待机表情
         self.current_gif_name = random.choice(GIF_CATEGORIES['idle'])
         self.movie = QMovie(self.gif_paths[self.current_gif_name])
@@ -131,6 +184,14 @@ class DesktopPet(QLabel):
         self._fullscreen_poll_timer = QTimer(self)
         self._fullscreen_poll_timer.timeout.connect(self._check_fullscreen)
         self._fullscreen_poll_timer.start(500)
+
+        # 系统托盘
+        self._tray_hidden = False
+        self._setup_tray()
+
+        # 启动随机待机 / 按时问候定时器
+        self._idle_switch_timer.start(20000)
+        self._greet_timer.start(60000)
 
     def load_offsets(self):
         """加载坐标配置（每个 GIF 的绘制偏移）"""
@@ -153,6 +214,11 @@ class DesktopPet(QLabel):
             self._saved_double_click = saved_dbl
             self._typing_enabled = data.get('typing', False)
             self._hide_on_fullscreen = data.get('hide_on_fullscreen', True)
+            self._opacity = data.get('opacity', 1.0)
+            self._scale_stepped = data.get('scale_stepped', True)
+            self._snap_to_edge = data.get('snap_to_edge', True)
+            self._random_idle_enabled = data.get('random_idle', True)
+            self._greeting_enabled = data.get('greeting', True)
 
     def save_settings(self):
         """保存当前位置和大小"""
@@ -160,7 +226,12 @@ class DesktopPet(QLabel):
         data = {'x': pos.x(), 'y': pos.y(), 'scale': self.scale_factor,
                 'double_click': self.double_click_name,
                 'typing': self._typing_enabled,
-                'hide_on_fullscreen': self._hide_on_fullscreen}
+                'hide_on_fullscreen': self._hide_on_fullscreen,
+                'opacity': self._opacity,
+                'scale_stepped': self._scale_stepped,
+                'snap_to_edge': self._snap_to_edge,
+                'random_idle': self._random_idle_enabled,
+                'greeting': self._greeting_enabled}
         with open(self.settings_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -180,7 +251,7 @@ class DesktopPet(QLabel):
             return False
 
     def _set_autostart(self, enable):
-        """设置或取消开机自启（注册表 Run 键）"""
+        """设置或取消开机自启（注册表 Run 键，带 --delay 延迟启动）"""
         if not sys.platform.startswith('win'):
             return False
         try:
@@ -190,11 +261,12 @@ class DesktopPet(QLabel):
                     0, winreg.KEY_SET_VALUE) as key:
                 if enable:
                     if getattr(sys, 'frozen', False):
-                        exe = os.path.abspath(sys.argv[0])
+                        cmd = '"%s" --delay 10' % os.path.abspath(sys.argv[0])
                     else:
-                        exe = sys.executable
+                        cmd = '"%s" "%s" --delay 10' % (
+                            sys.executable, os.path.abspath(__file__))
                     winreg.SetValueEx(key, '胧嫣桌宠', 0,
-                                      winreg.REG_SZ, '"%s"' % exe)
+                                      winreg.REG_SZ, cmd)
                 else:
                     try:
                         winreg.DeleteValue(key, '胧嫣桌宠')
@@ -222,6 +294,119 @@ class DesktopPet(QLabel):
         self.move_to_corner()
         self.update_frame(self.movie.currentFrameNumber())
         self.save_settings()
+
+    def toggle_position_lock(self):
+        """切换锁定位置（锁定后禁止拖拽移动）"""
+        self._position_locked = not self._position_locked
+        self._lock_action.setChecked(self._position_locked)
+
+    def toggle_snap_to_edge(self):
+        """切换边界吸附开关"""
+        self._snap_to_edge = not self._snap_to_edge
+        self._snap_action.setChecked(self._snap_to_edge)
+        self.save_settings()
+
+    def toggle_scale_stepped(self):
+        """切换滚轮缩放模式（步进 / 平滑）"""
+        self._scale_stepped = not self._scale_stepped
+        self._scale_stepped_action.setChecked(self._scale_stepped)
+        self.save_settings()
+
+    def set_opacity(self, value):
+        """设置整体透明度（0~1），重绘当前帧立即生效"""
+        self._opacity = value
+        self.update_frame(self.movie.currentFrameNumber())
+        self.save_settings()
+
+    def toggle_random_idle(self):
+        """切换随机待机开关"""
+        self._random_idle_enabled = not self._random_idle_enabled
+        self._random_idle_action.setChecked(self._random_idle_enabled)
+        self.save_settings()
+
+    def toggle_greeting(self):
+        """切换按时问候开关"""
+        self._greeting_enabled = not self._greeting_enabled
+        self._greeting_action.setChecked(self._greeting_enabled)
+        self.save_settings()
+
+    def _is_idle(self):
+        """是否空闲待机态：无双击动作、无打字、无单击反应、当前是待机表情"""
+        return (not self._double_click_on
+                and not self._typing_active
+                and not self.click_recovery_timer.isActive()
+                and self.current_gif_name in GIF_CATEGORIES['idle'])
+
+    def _maybe_switch_idle(self):
+        """随机待机：空闲时随机换一个待机表情（排除当前）"""
+        if not self._random_idle_enabled or not self._is_idle():
+            return
+        idle_gifs = [g for g in GIF_CATEGORIES['idle'] if g != self.current_gif_name]
+        if not idle_gifs:
+            idle_gifs = GIF_CATEGORIES['idle']
+        self.switch_to_gif(random.choice(idle_gifs))
+
+    def _check_greeting(self):
+        """按时问候：固定时段（早 6-12 / 午 12-18 / 晚 18-24）各问候一次"""
+        if not self._greeting_enabled or not self._is_idle():
+            return
+        now = time.localtime()
+        hour = now.tm_hour
+        if 6 <= hour < 12:
+            period = 'morning'
+        elif 12 <= hour < 18:
+            period = 'afternoon'
+        elif 18 <= hour < 24:
+            period = 'evening'
+        else:
+            return  # 0~6 点不问候
+        key = '%04d-%02d-%02d-%s' % (now.tm_year, now.tm_mon, now.tm_mday, period)
+        if key == self._last_greet_key:
+            return
+        self._last_greet_key = key
+        self.switch_to_gif('哈喽.gif')
+        self._show_bubble(random.choice(BUBBLE_LINES['greet_' + period]))
+        self.click_recovery_timer.start(4000)
+
+    # ---- 气泡 ----
+
+    def _show_bubble(self, text):
+        """在桌宠头顶弹出文字气泡"""
+        if self.bubble is None:
+            self.bubble = BubbleLabel()
+            self.bubble.setWindowFlags(Qt.WindowType.FramelessWindowHint
+                                       | Qt.WindowType.Tool
+                                       | Qt.WindowType.WindowStaysOnTopHint)
+        self.bubble.setText(text)
+        self.bubble.adjustSize()
+        self.bubble.show()
+        self.bubble.raise_()
+        self._position_bubble()
+        self._bubble_timer.start(3000)
+
+    def _hide_bubble(self):
+        """隐藏气泡"""
+        if self.bubble is not None:
+            self.bubble.hide()
+
+    def _position_bubble(self):
+        """气泡定位到可见内容（GIF）头顶居中，并裁剪到屏幕内"""
+        if self.bubble is None or not self.bubble.isVisible():
+            return
+        geo = self.frameGeometry()
+        left, top, right, bottom = self._visible_margins()
+        bw = self.bubble.width()
+        bh = self.bubble.height()
+        # 可见内容（缩放后的 GIF）在屏幕上的实际位置
+        content_left = geo.left() + left
+        content_top = geo.top() + top
+        content_width = geo.width() - left - right
+        x = content_left + content_width // 2 - bw // 2
+        y = content_top - bh - 6
+        screen = QApplication.primaryScreen().availableGeometry()
+        x = max(screen.left(), min(x, screen.right() - bw))
+        y = max(screen.top(), min(y, screen.bottom() - bh))
+        self.bubble.move(x, y)
 
     @property
     def double_click_name(self):
@@ -288,6 +473,41 @@ class DesktopPet(QLabel):
         y = screen.height() - self.height() - 100
         self.move(x, y)
 
+    def _visible_margins(self):
+        """返回当前缩放下可见内容到窗口四边的距离（左, 上, 右, 下）"""
+        frame = self.movie.currentPixmap()
+        if frame.isNull():
+            pad = self.PAD
+            return pad, pad, pad, pad
+        w = frame.width()
+        h = frame.height()
+        # 缩放后内容在窗口内居中，四周空隙随缩放变化；放大时内容超出被裁，空隙取 0
+        hmargin = max(0, self.PAD + (w - int(w * self.scale_factor)) // 2)
+        vmargin = max(0, self.PAD + (h - int(h * self.scale_factor)) // 2)
+        offset = self.offsets.get(self.current_gif_name, {'x': 0, 'y': 0})
+        return (hmargin + offset['x'], vmargin + offset['y'],
+                hmargin - offset['x'], vmargin - offset['y'])
+
+    def _clamp_to_screen(self):
+        """拖拽结束后把桌宠吸附回屏幕可视区域"""
+        if not self._snap_to_edge:
+            return
+        screen = QApplication.primaryScreen().availableGeometry()
+        geo = self.frameGeometry()
+        left, top, right, bottom = self._visible_margins()
+        x = geo.x()
+        y = geo.y()
+        # 四边统一：可见内容贴边，透明边可超出（下边进入任务栏区域，透明穿透不遮挡）
+        if x < screen.left() - left:
+            x = screen.left() - left
+        if y < screen.top() - top:
+            y = screen.top() - top
+        if x + geo.width() > screen.right() + right:
+            x = screen.right() + right - geo.width()
+        if y + geo.height() > screen.bottom() + bottom:
+            y = screen.bottom() + bottom - geo.height()
+        self.move(x, y)
+
     def update_frame(self, frame_number):
         """更新每一帧：应用坐标偏移并缩放"""
         current_frame = self.movie.currentPixmap()
@@ -296,7 +516,7 @@ class DesktopPet(QLabel):
         if self.original_size is None:
             self.original_size = (current_frame.width(), current_frame.height())
         offset = self.offsets.get(self.current_gif_name, {'x': 0, 'y': 0})
-        pad = 50
+        pad = self.PAD
         canvas_w = current_frame.width() + pad * 2
         canvas_h = current_frame.height() + pad * 2
         canvas = QPixmap(canvas_w, canvas_h)
@@ -314,19 +534,37 @@ class DesktopPet(QLabel):
             painter.drawPixmap(dx, dy, draw_frame)
         else:
             painter.drawPixmap(pad + offset['x'], pad + offset['y'], current_frame)
+        # 应用整体透明度（DestinationIn 只改 alpha，透明背景保持透明）
+        if self._opacity < 1.0:
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_DestinationIn)
+            painter.fillRect(canvas.rect(), QColor(0, 0, 0, int(self._opacity * 255)))
         painter.end()
         self.setPixmap(canvas)
         self.adjustSize()
 
+    PAD = 50
+    SCALE_STEPS = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+
     def wheelEvent(self, event):
-        """鼠标滚轮：缩放桌宠"""
+        """鼠标滚轮：缩放桌宠（步进模式按固定档位，平滑模式按比例）"""
         delta = event.angleDelta().y()
-        if delta > 0:
-            self.scale_factor *= 1.1
+        if self._scale_stepped:
+            scale = self.scale_factor
+            if delta > 0:
+                self.scale_factor = next(
+                    (s for s in self.SCALE_STEPS if s > scale + 1e-6), scale)
+            else:
+                self.scale_factor = next(
+                    (s for s in reversed(self.SCALE_STEPS) if s < scale - 1e-6), scale)
         else:
-            self.scale_factor /= 1.1
-        self.scale_factor = max(0.5, min(2, self.scale_factor))
+            if delta > 0:
+                self.scale_factor *= 1.1
+            else:
+                self.scale_factor /= 1.1
+            self.scale_factor = max(0.5, min(2, self.scale_factor))
         self.update_frame(self.movie.currentFrameNumber())
+        self._position_bubble()
         event.accept()
 
     def recover_from_click(self):
@@ -407,8 +645,9 @@ class DesktopPet(QLabel):
             if not hwnd or int(hwnd) == int(self.winId()):
                 if self._hidden_by_fullscreen:
                     self._hidden_by_fullscreen = False
-                    self.show()
-                else:
+                    if not self._tray_hidden:
+                        self.show()
+                elif not self._tray_hidden:
                     self._assert_topmost()
                 return
 
@@ -437,12 +676,15 @@ class DesktopPet(QLabel):
                 if not self._hidden_by_fullscreen:
                     self._hidden_by_fullscreen = True
                     self.hide()
+                    self._hide_bubble()
             else:
                 if self._hidden_by_fullscreen:
                     self._hidden_by_fullscreen = False
-                    self.show()
-                # 无论是否全屏都保持置顶，避免被全屏/其它置顶窗口盖住
-                self._assert_topmost()
+                    if not self._tray_hidden:
+                        self.show()
+                if not self._tray_hidden:
+                    # 无论是否全屏都保持置顶，避免被全屏/其它置顶窗口盖住
+                    self._assert_topmost()
         except Exception:
             pass
 
@@ -464,6 +706,8 @@ class DesktopPet(QLabel):
     def mouseMoveEvent(self, event):
         """鼠标移动事件（拖拽）"""
         if event.buttons() & Qt.MouseButton.LeftButton:
+            if self._position_locked:
+                return
             current_pos = event.globalPosition().toPoint()
             distance = (current_pos - self.press_position).manhattanLength()
             if distance > self.drag_threshold:
@@ -471,6 +715,7 @@ class DesktopPet(QLabel):
                     self.is_dragging = True
                     self.switch_to_gif(random.choice(self._drag_gifs))
                 self.move(current_pos - self.drag_position)
+                self._position_bubble()
                 event.accept()
 
     def mouseReleaseEvent(self, event):
@@ -485,13 +730,13 @@ class DesktopPet(QLabel):
             if self.is_dragging:
                 self.is_dragging = False
                 self.switch_to_gif(self.pre_drag_gif_name)
+                self._clamp_to_screen()
             elif distance <= self.drag_threshold:
                 reaction_gif = self.random_from_category('reactions')
                 self.switch_to_gif(reaction_gif)
+                self._show_bubble(random.choice(BUBBLE_LINES['click']))
             self.click_recovery_timer.start(2000)
             event.accept()
-        elif event.button() == Qt.MouseButton.RightButton:
-            self.show_context_menu(event.globalPosition().toPoint())
 
     def mouseDoubleClickEvent(self, event):
         """鼠标双击：在默认待机与选定的双击动作之间切换"""
@@ -507,13 +752,49 @@ class DesktopPet(QLabel):
                 self.switch_to_gif(self.double_click_name)
             event.accept()
 
-    def show_context_menu(self, position):
-        """显示右键菜单"""
-        menu = QMenu(self)
+    def _build_menu(self):
+        """构建完整功能菜单（供托盘右键使用）"""
+        menu = QMenu()
+
+        self._tray_toggle_action = QAction('隐藏桌宠', self)
+        self._tray_toggle_action.triggered.connect(self.toggle_visible_from_tray)
+        menu.addAction(self._tray_toggle_action)
+        menu.addSeparator()
 
         reset_action = QAction('重置位置和大小', self)
         reset_action.triggered.connect(self.reset_position_and_size)
         menu.addAction(reset_action)
+
+        self._lock_action = QAction('锁定位置', self)
+        self._lock_action.setCheckable(True)
+        self._lock_action.setChecked(self._position_locked)
+        self._lock_action.triggered.connect(self.toggle_position_lock)
+        menu.addAction(self._lock_action)
+
+        self._snap_action = QAction('边界吸附', self)
+        self._snap_action.setCheckable(True)
+        self._snap_action.setChecked(self._snap_to_edge)
+        self._snap_action.triggered.connect(self.toggle_snap_to_edge)
+        menu.addAction(self._snap_action)
+
+        self._scale_stepped_action = QAction('缩放步进', self)
+        self._scale_stepped_action.setCheckable(True)
+        self._scale_stepped_action.setChecked(self._scale_stepped)
+        self._scale_stepped_action.triggered.connect(self.toggle_scale_stepped)
+        menu.addAction(self._scale_stepped_action)
+
+        # 透明度子菜单
+        opacity_menu = QMenu('透明度', menu)
+        opacity_group = QActionGroup(self)
+        opacity_group.setExclusive(True)
+        for value, label in [(1.0, '100%'), (0.8, '80%'), (0.6, '60%'), (0.4, '40%')]:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setChecked(abs(self._opacity - value) < 0.01)
+            act.triggered.connect(lambda checked, v=value: self.set_opacity(v))
+            opacity_group.addAction(act)
+            opacity_menu.addAction(act)
+        menu.addMenu(opacity_menu)
         menu.addSeparator()
 
         autostart_action = QAction('开机自启', self)
@@ -524,6 +805,18 @@ class DesktopPet(QLabel):
             autostart_action.setEnabled(False)
         menu.addAction(autostart_action)
         menu.addSeparator()
+
+        self._random_idle_action = QAction('随机待机', self)
+        self._random_idle_action.setCheckable(True)
+        self._random_idle_action.setChecked(self._random_idle_enabled)
+        self._random_idle_action.triggered.connect(self.toggle_random_idle)
+        menu.addAction(self._random_idle_action)
+
+        self._greeting_action = QAction('按时问候', self)
+        self._greeting_action.setCheckable(True)
+        self._greeting_action.setChecked(self._greeting_enabled)
+        self._greeting_action.triggered.connect(self.toggle_greeting)
+        menu.addAction(self._greeting_action)
 
         self._typing_action = QAction('打字检测', self)
         self._typing_action.setCheckable(True)
@@ -560,12 +853,54 @@ class DesktopPet(QLabel):
         quit_action.triggered.connect(self.do_quit)
         menu.addAction(quit_action)
 
-        menu.exec(position)
+        return menu
+
+    def _setup_tray(self):
+        """创建系统托盘图标和菜单"""
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray = None
+            self._tray_toggle_action = None
+            self._typing_action = None
+            self._fullscreen_action = None
+            self._lock_action = None
+            self._snap_action = None
+            self._scale_stepped_action = None
+            self._random_idle_action = None
+            self._greeting_action = None
+            return
+        icon_path = os.path.join(self._resource_path, 'favicon.ico')
+        self.tray = QSystemTrayIcon(QIcon(icon_path), self)
+        self.tray.setToolTip('胧嫣桌宠')
+        self.tray.setContextMenu(self._build_menu())
+        self.tray.activated.connect(self._on_tray_activated)
+        self.tray.show()
+
+    def _on_tray_activated(self, reason):
+        """单击托盘图标切换显示/隐藏"""
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self.toggle_visible_from_tray()
+
+    def toggle_visible_from_tray(self):
+        """托盘切换桌宠显示/隐藏"""
+        if self._tray_hidden:
+            self._tray_hidden = False
+            self._hidden_by_fullscreen = False
+            self.show()
+            self._assert_topmost()
+            self._tray_toggle_action.setText('隐藏桌宠')
+        else:
+            self._tray_hidden = True
+            self.hide()
+            self._hide_bubble()
+            self._tray_toggle_action.setText('显示桌宠')
 
     def do_quit(self):
         """退出前保存设置并清理监听"""
         self._stop_keyboard_listener()
         self.save_settings()
+        self._hide_bubble()
+        if self.tray is not None:
+            self.tray.hide()
         QApplication.quit()
 
     def switch_to_gif(self, name):
@@ -604,5 +939,16 @@ if __name__ == '__main__':
         sys.exit(0)
 
     pet = DesktopPet()
-    pet.show()
+
+    # 延迟启动：开机自启注册带 --delay N，延迟 N 秒再显示
+    delay = 0
+    if '--delay' in sys.argv:
+        try:
+            delay = int(sys.argv[sys.argv.index('--delay') + 1])
+        except (ValueError, IndexError):
+            delay = 0
+    if delay > 0:
+        QTimer.singleShot(delay * 1000, pet.show)
+    else:
+        pet.show()
     sys.exit(app.exec())
