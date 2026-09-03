@@ -54,6 +54,9 @@ if sys.platform.startswith('win'):
     _user32.SetWindowPos.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.HWND,
                                      ctypes.c_int, ctypes.c_int, ctypes.c_int,
                                      ctypes.c_int, ctypes.wintypes.UINT]
+    _user32.GetClassNameW.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.LPWSTR,
+                                      ctypes.c_int]
+    _user32.GetClassNameW.restype = ctypes.c_int
 from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox, QSystemTrayIcon
 from PyQt6.QtCore import Qt, QTimer, QPoint, QLockFile, QDir, QSize
 from PyQt6.QtGui import QPixmap, QMovie, QPainter, QIcon, QAction, QActionGroup, QColor
@@ -643,6 +646,18 @@ class DesktopPet(QLabel):
 
             # 无前台窗口或前台是自身：保证可见并置顶即可
             if not hwnd or int(hwnd) == int(self.winId()):
+                if self._hidden_by_fullscreen:
+                    self._hidden_by_fullscreen = False
+                    if not self._tray_hidden:
+                        self.show()
+                elif not self._tray_hidden:
+                    self._assert_topmost()
+                return
+
+            # 排除桌面窗口（Progman/WorkerW）：Win+D 或点击桌面时不要误判为全屏
+            cls_buf = ctypes.create_unicode_buffer(256)
+            _user32.GetClassNameW(hwnd, cls_buf, 256)
+            if cls_buf.value in ('Progman', 'WorkerW'):
                 if self._hidden_by_fullscreen:
                     self._hidden_by_fullscreen = False
                     if not self._tray_hidden:
